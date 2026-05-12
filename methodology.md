@@ -1,187 +1,221 @@
-# Methodology — Advanced RAG & governance analytics
+# Methodology: Retrieval-Augmented Compliance Gap Analysis
 
-This document formalizes the **information retrieval setup**, **prompt contracts**, **risk semantics**, and **evaluation stance** for the Compliance Impact Agent. It is written for reviewers who care about **traceability** and **limitations**, not buzzwords.
-
----
-
-## 1. Objective function (informal)
-
-Given regulation corpus \(R\) and policy corpus \(P\), approximate:
-
-\[
-\text{Gap}(r_i, P) \approx \text{LLM}\bigl(r_i,\; \text{TopK}(r_i, P)\bigr)
-\]
-
-where \(r_i\) is the \(i\)-th regulation chunk and \(\text{TopK}\) is dense retrieval over embedded policy chunks.
-
-We **do not** solve legal entailment; we approximate **coverage** and **defensibility** of internal policy language against regulatory clauses surfaced in \(r_i\).
+This document formalizes the information retrieval design, prompt contracts, scoring semantics, complexity model, and known limitations of the Compliance Impact Agent. It is written for ML engineers and GRC stakeholders who require traceability and reproducibility, not a marketing summary.
 
 ---
 
-## 2. Corpus construction
+## 1. Problem Formulation
 
-### 2.1 Policy index (retrieval corpus)
+Given a regulation corpus R and a company policy corpus P, the system approximates:
 
-1. Extract plain text \(P_{\text{raw}}\).
-2. Split into chunks \(\{p_j\}_{j=1}^{M}\) with RecursiveCharacterTextSplitter:
-   - Target length \(L \approx 800\) characters.
-   - Overlap \(\Delta \approx 120\) characters.
-3. Embed each \(p_j\) → vector \(v_j \in \mathbb{R}^d\) (MiniLM dimension \(d{=}384\) or OpenAI model-dependent \(d\)).
-4. Build FAISS inner-product index on **normalized** vectors (when using local embeddings with `normalize_embeddings=True`).
+```
+Gap(r_i, P) = LLM( r_i, TopK(r_i, P) )
+```
 
-**Design invariant:** retrieval operates **only** on policy text—regulation text never enters the vector index. This avoids cross-contamination and mirrors “Does our policy mention anything relevant?” queries.
+where `r_i` is the i-th regulation chunk and `TopK` is dense retrieval over embedded policy chunks.
 
-### 2.2 Regulation stream (query stream)
-
-1. Extract \(R_{\text{raw}}\), split into \(\{r_i\}_{i=1}^{N}\) with same splitter hyperparameters for comparability.
-2. Optional cap \(N' = \min(N, N_{\max})\) where \(N_{\max}\) is `max_regulation_chunks_for_compare` — controls cost/latency.
+The system does not solve legal entailment. It approximates coverage and defensibility of internal policy language against regulatory obligations surfaced in each `r_i`. The distinction is material: a finding of "compliant" means the retrieved policy text contains language that the LLM judges as responsive to the regulation excerpt — not that the organization is legally compliant.
 
 ---
 
-## 3. Retrieval specification
+## 2. Corpus Construction
 
-For each regulation chunk \(r_i\):
+### 2.1 Policy Index (Retrieval Corpus)
 
-1. **Query embedding**: embed \(r_i\) with the **same** embedding model as policy chunks.
-2. **Neighbor search**: retrieve \(K\) policy chunks (default \(K{=}5\)) via FAISS similarity search.
-3. **Context packing**: concatenate retrieved chunks with lightweight boundaries for the LLM (see `backend/services/rag.py`).
+The policy document is processed as follows:
 
-**Why top-\(K\) not re-ranking?** Hackathon scope; cross-encoder reranking would sit between FAISS hits and LLM for higher precision.
+1. Extract plain text from the uploaded artifact using PyMuPDF (PDF), python-docx (DOCX), or direct byte decoding with encoding fallback (TXT).
+2. Normalize whitespace and Unicode via `clean_text()`.
+3. Split into overlapping chunks `{p_j}` using `RecursiveCharacterTextSplitter`:
+   - Target chunk length: 800 characters
+   - Overlap: 120 characters
+   - Separator hierarchy: paragraph break, line break, sentence boundary, word boundary, character
+4. Embed each chunk `p_j` into a dense vector `v_j` in R^d:
+   - Local path: `sentence-transformers/all-MiniLM-L6-v2`, d=384, L2-normalized
+   - OpenAI path: `text-embedding-3-small` or configured model, d=1536
+5. Build an in-memory FAISS flat index over normalized vectors. Inner-product search on normalized vectors is equivalent to cosine similarity.
 
----
+Design invariant: only policy text enters the vector index. Regulation text is never indexed. This ensures retrieval answers the question "does our policy contain language relevant to this regulatory obligation?" without cross-contamination.
 
-## 4. Prompt taxonomy (contracts)
+### 2.2 Regulation Stream (Query Stream)
 
-| ID | File | Output schema | Temperature (typical) | Role |
-|----|------|----------------|----------------------|------|
-| **P1** | `summarize_regulation.txt` | Single JSON object with thematic arrays | Low (~0.2) | Macro obligations catalog |
-| **P2** | `compare_gap.txt` | Single JSON object per chunk pair evaluation | Low (~0.15) | Grounded gap card |
-| **P3** | `department_mapping.txt` | JSON with `mappings[]` | Low (~0.1) | RACI-style routing |
+1. Extract and normalize regulation text using the same pipeline as policy.
+2. Split into chunks `{r_i}` using identical splitter hyperparameters for comparability.
+3. Apply optional cap: `N' = min(N, max_reg_chunks)` where `max_reg_chunks` defaults to 24. This controls LLM call count and therefore cost and latency.
 
-**Contract enforcement:**
-
-- Primary path: `response_format=json_object` where the provider supports it.
-- Fallback: tolerant JSON extraction (`backend/services/llm.py`) + structured degradation in `compliance_engine.py`.
-
----
-
-## 5. Gap taxonomy (encoded in P2)
-
-The LLM labels each slice with:
-
-| Field | Interpretation |
-|-------|----------------|
-| `compliance_status` | Ordinal perception: compliant / partial / non-compliant / unclear |
-| `gap_type` | missing_coverage · weak_implementation · contradiction · ambiguous_clause · none |
-| `risk` | high · medium · low — **operational/legal exposure heuristic**, not quantitative VaR |
-| `policy_evidence` | Quote or honest statement of weak retrieval |
-
-These labels feed dashboards and CSV/JSON export—they are **not** statutory classifications.
+The cap is applied to the leading chunks. For regulations with a preamble followed by operative clauses, consider pre-processing to remove non-normative text before upload.
 
 ---
 
-## 6. Aggregation semantics
+## 3. Retrieval Specification
 
-### 6.1 Risk histogram
+For each regulation chunk `r_i`:
 
-\[
-\text{count}(t) = \bigl|\{ f \in \mathcal{F} : \text{risk}(f)=t \}\bigr|, \quad t \in \{\text{high, medium, low}\}
-\]
+1. Embed `r_i` using the same embedding model as the policy index. Embedding model consistency is a hard requirement; mixing models produces meaningless similarity scores.
+2. Execute FAISS similarity search to retrieve K nearest policy chunks (default K=5).
+3. Pack retrieved chunks into a numbered context block for the LLM prompt.
 
-where \(\mathcal{F}\) is the findings list.
-
-### 6.2 Aggregated posture (`aggregated_status`)
-
-Defined in code as a **conservative** lattice:
-
-1. If \(\exists f\) with `compliance_status = non-compliant` **or** \(\text{count}(\text{high}) > 0\) → **`non-compliant`**.
-2. Else if \(\text{count}(\text{medium}) > 0\) → **`partial`**.
-3. Else → **`compliant`**.
-
-This biases toward **false positives** on posture (safer for demos than false negatives).
-
-### 6.3 Readiness score (heuristic)
-
-Let \(\mathcal{F}' \subseteq \mathcal{F}\) be findings where **not** (`compliant` ∧ `gap_type = none`). Define penalties \( \pi(\text{high})=15,\ \pi(\text{medium})=8,\ \pi(\text{low})=3 \).
-
-\[
-\text{score} = \max\left(0,\ 100 - \sum_{f \in \mathcal{F}'} \pi(\text{risk}(f))\right)
-\]
-
-Bounded to \([0,100]\). This is a **demo KPI**, not an ISO metric.
+The retrieval step is a single-stage dense retrieval with no re-ranking. A cross-encoder re-ranker between FAISS candidates and the LLM would improve precision at the cost of additional inference latency. This is noted as a production improvement path.
 
 ---
 
-## 7. Complexity & cost model (analysis pass)
+## 4. Prompt Contracts
+
+Three prompt contracts govern all LLM interactions. They are defined as inline string constants in `streamlit_app.py` and versioned with the codebase.
+
+| ID | Constant | Output Schema | Temperature | Role |
+|---|---|---|---|---|
+| P1 | `PROMPT_SUMMARIZE` | Single JSON object with six thematic arrays | 0.2 | Macro obligations catalog from full regulation text |
+| P2 | `PROMPT_COMPARE` | Single JSON object with seven fields per chunk pair | 0.15 | Grounded gap assessment for one regulation chunk against retrieved policy context |
+| P3 | `PROMPT_DEPT` | JSON object with `mappings[]` array | 0.1 | RACI-style department assignment across all findings |
+
+**Contract enforcement strategy:**
+
+- Primary: `response_format={"type": "json_object"}` where the provider supports it (Groq, OpenAI).
+- Fallback: tolerant JSON extraction in `_parse_json()` — attempts direct parse, then fenced code block extraction, then regex brace matching.
+- Degradation: if all extraction attempts fail, the finding is populated with `error: invalid_json` and a truncated raw response. The pipeline continues rather than aborting.
+
+Low temperature values are intentional. Gap analysis requires consistent, grounded outputs. Higher temperatures increase creative hallucination risk, which is the primary failure mode for this task.
+
+---
+
+## 5. Gap Taxonomy
+
+Each finding produced by P2 carries the following fields:
+
+| Field | Type | Values | Interpretation |
+|---|---|---|---|
+| `compliance_status` | enum | compliant, partial, non-compliant, unclear | LLM's ordinal judgment of policy coverage for this regulation excerpt |
+| `gap_type` | enum | missing_coverage, weak_implementation, contradiction, ambiguous_clause, none | Structural classification of the gap |
+| `risk` | enum | high, medium, low | Operational and legal exposure heuristic |
+| `gap` | string | Free text | Narrative description of the gap or "No material gap detected" |
+| `recommendation` | string | Free text | 2-4 actionable remediation steps |
+| `regulation_excerpt_summary` | string | Free text | One-sentence summary of the regulation clause |
+| `policy_evidence` | string | Free text | Most relevant retrieved policy language, or explicit statement of absence |
+
+Risk calibration guidance in P2 is explicit:
+- High: material gap where a mandatory obligation is absent or directly contradicted; severe regulatory exposure if unaddressed.
+- Medium: partial coverage; policy mentions the topic but lacks specificity, defined processes, timeframes, or operational controls.
+- Low: minor gap; policy intent is clear but wording is ambiguous or a small clarification is needed.
+
+These labels are heuristic classifications produced by a language model. They are not quantitative risk scores and should not be treated as such in regulatory filings.
+
+---
+
+## 6. Aggregation Semantics
+
+### 6.1 Risk Histogram
+
+```
+count(t) = |{ f in F : risk(f) = t }|,  t in {high, medium, low}
+```
+
+where F is the complete findings list.
+
+### 6.2 Aggregated Posture
+
+The aggregated status is computed as a conservative lattice to bias toward false positives (safer for compliance tooling than false negatives):
+
+1. If any finding has `compliance_status = non-compliant` OR `count(high) > 0` → `non-compliant`
+2. Else if `count(medium) > 0` → `partial`
+3. Else → `compliant`
+
+### 6.3 Compliance Readiness Score
+
+Let F' be the subset of findings where the finding is not simultaneously `compliant` and `gap_type = none`. Define penalties:
+
+```
+pi(high) = 15
+pi(medium) = 8
+pi(low) = 3
+```
+
+```
+score = max(0, 100 - sum_{f in F'} pi(risk(f)))
+```
+
+The score is bounded to [0, 100]. It is a demo KPI designed to give a single-number summary for presentation purposes. It is not derived from any ISO standard, NIST framework, or actuarial model. Organizations should not use this score as a compliance certification metric.
+
+---
+
+## 7. Complexity and Cost Model
 
 Let:
+- N' = number of regulation chunks analyzed (after cap)
+- M = number of policy chunks
+- K = retrieval width
 
-- \(N'\) = regulation chunks analyzed (after cap).
-- \(K\) = retrieval width.
+**LLM calls per analysis session:**
 
-**Approximate LLM calls:**
+```
+C_LLM = 1 (P1: summarize) + N' (P2: compare, one per reg chunk) + 1 (P3: departments)
+      = N' + 2
+```
 
-\[
-C_{\text{LLM}} \approx 1 \ (\text{P1}) + N' \ (\text{P2}) + 1 \ (\text{P3})
-\]
+**Embedding calls:**
 
-**Approximate embedding calls:**
+```
+C_emb = M + N'  (policy index build + regulation chunk queries)
+```
 
-\[
-C_{\text{emb}} \approx M + N \quad (\text{policy + regulation chunks})
-\]
-
-Dominant latency term is usually **\(N' \times\) LLM round-trip**.
-
----
-
-## 8. Evaluation framework (recommended)
-
-For hackathon judging or internal QA, track:
-
-| Metric | Definition | Tooling hint |
-|--------|--------------|----------------|
-| **Citation fidelity** | % findings where `policy_evidence` is substring-related to retrieved chunk | Manual rubric on sample |
-| **Retrieval precision@K** | Manual relevance labels on policy hits for sampled \(r_i\) | Offline notebook |
-| **JSON validity rate** | % calls producing parseable JSON without fallback | Log parser |
-| **Latency P95** | End-to-end `/analyze` | Wireshark / server timestamps |
-
-Gold labels for compliance are expensive—start with **expert spot checks** on 10–20 clause pairs.
+With default settings (max_reg_chunks=24, K=5), a typical analysis session makes 26 LLM calls. Dominant latency is N' x LLM round-trip time. On Groq with llama-3.3-70b-versatile, each call typically completes in 1-4 seconds, giving a total analysis time of 30-120 seconds depending on document complexity.
 
 ---
 
-## 9. Failure modes & mitigations
+## 8. Evaluation Framework
 
-| Failure | Cause | Mitigation |
-|---------|-------|------------|
-| Retrieval misses obligation | Policy uses different terminology | Synonym expansion query rewrite; bigger \(K\) |
-| LLM over-claims compliance | Weak prompt grounding | Lower temperature; require “no evidence” utterance |
-| PDF extraction drops text | Scanned PDF without OCR | Add OCR stage (not in MVP) |
-| Long regulation truncation | Chunk budget | Raise \(N_{\max}\) with cost awareness |
+For hackathon judging or internal quality assurance, the following metrics are recommended:
 
----
+| Metric | Definition | Measurement Approach |
+|---|---|---|
+| Citation fidelity | Proportion of findings where `policy_evidence` is semantically related to at least one retrieved chunk | Manual rubric on a sample of 20-30 findings |
+| Retrieval precision at K | Proportion of retrieved policy chunks judged relevant to the regulation query by a domain expert | Offline annotation notebook with sampled regulation chunks |
+| JSON validity rate | Proportion of LLM calls producing parseable JSON without fallback extraction | Log parser counting `invalid_json` occurrences in results |
+| Risk calibration | Agreement between LLM risk labels and expert labels on a held-out clause set | Cohen's kappa on expert-annotated sample |
+| End-to-end latency P95 | 95th percentile of total analysis time across multiple runs | Instrumented timing around `run_analysis()` |
 
-## 10. Compliance & ethics disclaimer
-
-Outputs are **decision support** only. Final legal positions require qualified counsel and organizational policy owners. Do not use readiness scores as regulatory filings.
-
----
-
-## 11. Reproducibility checklist
-
-- [ ] `.env` documents `LLM_PROVIDER`, `GROQ_MODEL` / `OPENAI_MODEL`, embedding provider.
-- [ ] Saved JSON includes `policy_stats` (chunks, \(K\), analyzed \(N'\)).
-- [ ] Prompt files pinned to Git commit SHA used for demo.
-- [ ] Dependency lock: reinstall from `requirements.txt` with same versions where possible.
+Gold labels for compliance gap assessment are expensive to produce. A practical starting point is expert spot-checks on 10-20 clause pairs covering each gap_type category.
 
 ---
 
-## 12. References (repo paths)
+## 9. Failure Modes and Mitigations
 
-| Artifact | Path |
-|----------|------|
-| Orchestration | `backend/services/compliance_engine.py` |
-| LLM client | `backend/services/llm.py` |
-| Retrieval | `backend/services/rag.py`, `vector_store.py` |
-| Config | `backend/utils/config.py` |
-| Prompts | `backend/prompts/*.txt` |
+| Failure Mode | Root Cause | Current Behavior | Recommended Mitigation |
+|---|---|---|---|
+| Retrieval misses relevant policy clause | Terminology mismatch between regulation and policy | Finding shows weak or absent policy_evidence | Query rewriting with synonym expansion; increase K |
+| LLM over-claims compliance | Insufficient grounding; model fills gaps with plausible language | False negatives in gap detection | Require explicit "no evidence found" utterance in prompt; lower temperature |
+| All findings rated high risk | Model ignores risk calibration guidance | Inflated readiness score penalty | Strengthen risk calibration examples in P2; use few-shot prompting |
+| PDF text extraction failure | Scanned PDF without embedded text layer | Empty or near-empty extracted text; validation error | Add OCR preprocessing stage (Tesseract or cloud OCR) |
+| Regulation truncation | Document exceeds chunk budget | Later clauses not analyzed | Raise max_reg_chunks with awareness of cost increase; pre-filter non-normative sections |
+| JSON parse failure cascade | Model returns markdown or prose instead of JSON | Degraded finding with error marker | Upgrade to a model with stronger instruction following; add retry with explicit JSON reminder |
+
+---
+
+## 10. Reproducibility Checklist
+
+To reproduce a specific analysis result:
+
+- Record the `LLM_PROVIDER`, model name, and embedding provider from the session configuration.
+- Retain the exported JSON report, which includes `policy_stats` (chunk counts, K, analyzed N').
+- Note the Git commit SHA of `streamlit_app.py` to recover the exact prompt text used.
+- Pin dependency versions: reinstall from `requirements.txt` with the same package versions.
+- Note that exact reproduction is not guaranteed due to LLM non-determinism at temperature > 0.
+
+---
+
+## 11. Compliance and Ethics Disclaimer
+
+Outputs from this system are decision-support artifacts only. They are produced by a language model operating on retrieved text and are subject to hallucination, retrieval gaps, and prompt sensitivity. Final legal positions require review by qualified privacy counsel and organizational policy owners. Readiness scores must not be submitted as evidence of regulatory compliance to any authority.
+
+---
+
+## 12. Code Reference
+
+| Component | Location |
+|---|---|
+| Full pipeline orchestration | `run_analysis()` in `streamlit_app.py` |
+| LLM client and JSON parsing | `chat_json()`, `_parse_json()` in `streamlit_app.py` |
+| Retrieval | `retrieve_context()`, `build_faiss_index()` in `streamlit_app.py` |
+| Embedding selection | `get_embeddings()`, `_resolved_embed()` in `streamlit_app.py` |
+| Configuration | `_Cfg`, `_load_cfg()`, `_resolved_llm()` in `streamlit_app.py` |
+| Prompt contracts | `PROMPT_SUMMARIZE`, `PROMPT_COMPARE`, `PROMPT_DEPT` in `streamlit_app.py` |

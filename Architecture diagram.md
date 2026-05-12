@@ -1,214 +1,321 @@
-# Architecture — Advanced technical views
+# Architecture: Compliance Impact Agent
 
-This document complements [README.md](README.md) with **architectural reasoning**: trust boundaries, deployment topologies, failure domains, and component responsibilities suitable for design reviews.
+This document provides architectural reasoning for the Compliance Impact Agent: component responsibilities, trust boundaries, data classification, sequence flows, and deployment topologies. It is intended for design reviews and technical due diligence, not operational runbooks (see README.md for those).
 
 ---
 
-## 1. Design goals
+## 1. Design Goals
 
 | Goal | Mechanism |
-|------|-----------|
-| **Evidence-linked outputs** | Policy chunks retrieved into the LLM context for every regulation slice |
-| **Provider portability** | OpenAI SDK + swappable `base_url` for Groq |
-| **Cost-aware demos** | Local embeddings path avoids OpenAI vector charges |
-| **Inspectable artifacts** | JSON snapshots under `data/results/` |
+|---|---|
+| Evidence-linked outputs | Policy chunks retrieved into LLM context for every regulation slice; `policy_evidence` field in each finding |
+| Single-process deployment | All logic — extraction, chunking, embeddings, FAISS, RAG, LLM, UI — runs inside one Streamlit process |
+| Provider portability | OpenAI SDK with swappable `base_url` covers both Groq and OpenAI without separate client libraries |
+| Cost-aware operation | Local sentence-transformers path eliminates embedding API charges; Groq provides low-latency inference at no embedding cost |
+| Inspectable artifacts | Full JSON export per session; `policy_stats` block records chunk counts and retrieval parameters for reproducibility |
 
 ---
 
-## 2. C4-style layering (conceptual)
+## 2. System Context
 
-### Level 1 — System context
+The system has one human actor and three external systems:
 
-```mermaid
-flowchart TB
-  subgraph org [Organization boundary]
-    U[Privacy / GRC analyst]
-  end
-  subgraph sys [Compliance Impact Agent]
-    UI[Web UI\nStreamlit]
-    API[HTTP API\nFastAPI]
-  end
-  subgraph world [External systems]
-    LLM[(LLM inference\nGroq / OpenAI)]
-    EMB[(Embedding API\noptional OpenAI)]
-    HF[(HF Hub\nmodel weights)]
-  end
-  U --> UI
-  UI --> API
-  API --> LLM
-  API --> EMB
-  API --> HF
+```
++---------------------+
+|  Privacy / GRC      |
+|  Analyst            |
++---------------------+
+          |
+          | browser
+          v
++---------------------+
+|  Streamlit App      |  <-- single process, single file
+|  (streamlit_app.py) |
++---------------------+
+     |          |
+     v          v
++--------+  +------------------+
+| Groq / |  | HuggingFace Hub  |
+| OpenAI |  | (first-run model |
+| APIs   |  |  download only)  |
++--------+  +------------------+
 ```
 
-### Level 2 — Containers
-
-| Container | Technology | Responsibility |
-|-----------|------------|----------------|
-| **Presentation** | Streamlit (`frontend/app.py`) | Upload UX, metrics, tabular findings, JSON export |
-| **Application API** | FastAPI (`backend/main.py`, `backend/api/routes.py`) | Multipart ingest, orchestrate analysis, serve cached JSON |
-| **Analysis core** | Python services (`backend/services/*`) | Extract → chunk → embed → FAISS → RAG loops → aggregate |
-| **Prompt library** | Text files (`backend/prompts/*.txt`) | Frozen prompt contracts versioned with code |
-| **Local persistence** | Filesystem (`data/uploads`, `data/results`) | MVP durable store |
+The analyst uploads two documents and receives a structured compliance report. No intermediate HTTP API exists between the UI and the analysis logic. The LLM APIs are the only external network dependencies during normal operation.
 
 ---
 
-## 3. Component interaction (detailed)
+## 3. Internal Component Decomposition
 
-```mermaid
-flowchart LR
-  subgraph routes [API layer]
-    RU[POST /upload]
-    RA[POST /analyze]
-    RG[GET /results]
-  end
-  subgraph svc [Services]
-    EX[extraction]
-    CH[chunking]
-    EM[embeddings]
-    VS[vector_store / FAISS]
-    RG2[rag.retrieve]
-    LL[llm.chat_*]
-    CE[compliance_engine]
-  end
-  subgraph io [IO]
-    UP[(uploads/job_id/*)]
-    RS[(results/job_id.json)]
-  end
-  RU --> EX
-  RA --> CE
-  CE --> EX
-  CE --> CH
-  CE --> EM --> VS
-  CE --> RG2 --> VS
-  CE --> LL
-  RU --> UP
-  RA --> UP
-  CE --> RS
-  RG --> RS
+All components reside in `streamlit_app.py`. The logical layers are:
+
 ```
-
----
-
-## 4. Trust boundaries and data classification
-
-```mermaid
-flowchart TB
-  subgraph untrusted [Untrusted input plane]
-    DOC[Uploaded PDF/DOCX/TXT]
-  end
-  subgraph processing [Processing plane — must not log raw content in prod]
-    P[Parse + chunk + embed]
-    IDX[FAISS index in RAM]
-  end
-  subgraph privileged [Privileged egress]
-    LLMNET[Third-party LLM APIs]
-  end
-  DOC --> P --> IDX
-  P --> LLMNET
-```
-
-| Data class | Typical content | At-rest (MVP) | In transit |
-|------------|-----------------|---------------|------------|
-| **Regulation text** | Statutory excerpts | `data/uploads/.../regulation.*` | HTTPS to LLM provider |
-| **Policy text** | Internal privacy statement | Same job folder | HTTPS to LLM provider |
-| **Embeddings** | Derived vectors | RAM only | — |
-| **Results JSON** | Gaps + recommendations | `data/results/*.json` | HTTPS to Streamlit host |
-
-**Important:** production systems should classify uploads as **confidential**, minimize retention, and avoid shipping raw documents to LLMs without **DPA** and **region** constraints—this MVP sends excerpts as required for analysis.
-
----
-
-## 5. Sequence — successful analyze path
-
-```mermaid
-sequenceDiagram
-  autonumber
-  participant C as Client
-  participant A as FastAPI
-  participant F as Job FS
-  participant E as compliance_engine
-  participant V as FAISS
-  participant L as LLM API
-
-  C->>A: POST /analyze {job_id}
-  A->>F: glob regulation.*, policy.*
-  A->>E: run_compliance_analysis
-  E->>E: extract + chunk policy/regulation
-  E->>V: build index(policy_chunks)
-  E->>L: summarize(regulation) JSON
-  loop i in 0..min(N, max_chunks)
-    E->>V: similarity_search(reg_chunk_i, k)
-    E->>L: compare(reg_chunk_i, policy_ctx) JSON
-  end
-  E->>L: departments(issues[]) JSON
-  E-->>A: aggregate payload
-  A->>F: write results JSON
-  A-->>C: 200 + results envelope
++---------------------------------------------------------------+
+|  CONFIGURATION LAYER                                          |
+|  _Cfg, _load_cfg(), _resolved_llm(), _resolved_embed()        |
+|  Reads from st.secrets (cloud) or os.environ / .env (local)   |
++---------------------------------------------------------------+
+|  EXTRACTION LAYER                                             |
+|  extract_text()                                               |
+|  PyMuPDF (PDF) | python-docx (DOCX) | byte decode (TXT)       |
++---------------------------------------------------------------+
+|  CHUNKING LAYER                                               |
+|  split_text()                                                 |
+|  RecursiveCharacterTextSplitter: 800 chars, 120 overlap       |
++---------------------------------------------------------------+
+|  EMBEDDING + INDEX LAYER                                      |
+|  get_embeddings() -> HuggingFaceEmbeddings | OpenAIEmbeddings |
+|  build_faiss_index(policy_chunks) -> FAISS flat index         |
++---------------------------------------------------------------+
+|  RETRIEVAL LAYER                                              |
+|  retrieve_context(store, reg_chunk) -> packed context string  |
+|  FAISS similarity_search, K=5 default                         |
++---------------------------------------------------------------+
+|  LLM LAYER                                                    |
+|  chat_json(system, user) -> dict                              |
+|  OpenAI SDK; json_object mode with tolerant fallback parsing  |
++---------------------------------------------------------------+
+|  COMPLIANCE ENGINE                                            |
+|  run_analysis(reg_path, pol_path) -> results dict             |
+|  Orchestrates all layers; produces findings[], aggregates     |
++---------------------------------------------------------------+
+|  PRESENTATION LAYER                                           |
+|  main() Streamlit UI                                          |
+|  Sidebar upload, progress bar, metrics row, four result tabs  |
++---------------------------------------------------------------+
 ```
 
 ---
 
-## 6. Sequence — degradation paths
+## 4. Analysis Pipeline: Detailed Sequence
 
-| Stage | Failure | System behavior |
-|-------|---------|-------------------|
-| Upload | Bad extension / oversize | `400`, job dir removed |
-| Analyze | Missing job dir | `404` |
-| Summarize LLM | Non-JSON | Empty structured summary; chunk loop continues |
-| Compare LLM | Non-JSON | Finding row with `ambiguous_clause` + snippet |
-| Dept LLM | Non-JSON | Departments omitted (empty arrays) |
-| Keys missing | Resolution throws | `503` / RuntimeError surfaced via HTTP |
-
----
-
-## 7. Deployment topologies
-
-### A. Developer laptop (default)
-
-Streamlit and Uvicorn on `127.0.0.1`; `.env` on disk; single-user.
-
-### B. Split UI and API (staging)
-
-```mermaid
-flowchart LR
-  subgraph pub [Public edge — TLS]
-    ST[Streamlit Cloud / static host]
-  end
-  subgraph vpc [Private network]
-    API[FastAPI behind reverse proxy]
-  end
-  ST -->|HTTPS + API key| API
+```
+Analyst uploads regulation + policy
+            |
+            v
+  [1] extract_text(reg_path)
+  [2] extract_text(pol_path)
+            |
+            v
+  [3] split_text(pol_text)  -> policy_chunks[]   (M chunks)
+  [4] split_text(reg_text)  -> reg_chunks[]       (N chunks, capped at N')
+            |
+            v
+  [5] build_faiss_index(policy_chunks)
+      - embed each policy chunk
+      - build normalized FAISS flat index
+            |
+            v
+  [6] chat_json(PROMPT_SUMMARIZE, regulation_text[:120000])
+      -> regulation_summary dict
+            |
+            v
+  for i in 0..N'-1:
+    [7] retrieve_context(store, reg_chunks[i])
+        -> top-K policy chunks as context string
+    [8] chat_json(PROMPT_COMPARE, reg_chunk + context)
+        -> raw finding dict
+    [9] _normalize_finding(raw, i)
+        -> structured finding with risk, gap_type, compliance_status
+            |
+            v
+  [10] chat_json(PROMPT_DEPT, issues_payload)
+       -> department mappings for all findings
+            |
+            v
+  [11] _readiness_score(findings)
+  [12] aggregate posture (conservative lattice)
+            |
+            v
+  results dict -> st.session_state -> UI render
 ```
 
-Rotate secrets in platform vault; restrict CORS to Streamlit origin.
+Total LLM calls: N' + 2 (one summarize, N' compare, one department mapping).
 
-### C. Future — async workers
+---
 
-```mermaid
-flowchart LR
-  API[FastAPI] --> Q[(Redis / SQS)]
-  Q --> W[Worker pods]
-  W --> OBJ[(Object storage)]
-  W --> LLM[(LLM)]
-  API --> POLL[GET /results async job id]
+## 5. Trust Boundaries and Data Classification
+
+```
++---------------------------+
+|  UNTRUSTED INPUT PLANE    |
+|  Uploaded PDF/DOCX/TXT    |
+|  (arbitrary user content) |
++---------------------------+
+            |
+            | extract_text() + clean_text()
+            v
++---------------------------+
+|  PROCESSING PLANE         |
+|  Plain text strings       |
+|  Chunk arrays             |
+|  FAISS index (RAM only)   |
+|  Must not log raw content |
++---------------------------+
+            |
+            | HTTPS
+            v
++---------------------------+
+|  PRIVILEGED EGRESS        |
+|  Third-party LLM APIs     |
+|  (Groq / OpenAI)          |
+|  Document excerpts sent   |
++---------------------------+
 ```
 
-Replace synchronous `/analyze` with **202 Accepted** + polling or Webhook.
+| Data Class | Typical Content | At Rest | In Transit |
+|---|---|---|---|
+| Regulation text | Statutory excerpts, public documents | Temporary directory, deleted after analysis | HTTPS to LLM provider |
+| Policy text | Internal privacy statement, potentially confidential | Temporary directory, deleted after analysis | HTTPS to LLM provider |
+| Embeddings | Derived dense vectors | RAM only, not persisted | Not transmitted |
+| Results JSON | Gap findings, recommendations | `st.session_state` only in cloud deployment | HTTPS to browser |
+
+Production note: sending internal policy text to third-party LLM APIs requires a Data Processing Agreement with the provider and may be subject to data residency constraints. This MVP does not enforce those constraints.
 
 ---
 
-## 8. Cross-cutting concerns checklist
+## 6. Embedding Provider Selection Logic
 
-| Concern | MVP | Hardening |
-|---------|-----|-----------|
-| **Observability** | Print / uvicorn logs | OpenTelemetry spans per stage + token counts |
-| **Rate limits** | None | Per-tenant quotas on `/analyze` |
-| **Multi-tenancy** | Single disk tree | Prefix uploads by `tenant_id` + KMS |
-| **Model drift** | Prompts in Git | Prompt registry + evaluation harness |
+```
+EMBEDDING_PROVIDER env var
+        |
+        +-- "local"  --> HuggingFaceEmbeddings(all-MiniLM-L6-v2)
+        |
+        +-- "openai" --> OpenAIEmbeddings(text-embedding-3-small)
+        |                [requires OPENAI_API_KEY]
+        |
+        +-- "auto"   --> OPENAI_API_KEY set?
+                              |
+                        yes --+--> OpenAIEmbeddings
+                        no  --+--> HuggingFaceEmbeddings
+```
+
+The local model is cached by the HuggingFace Hub library after first download. On Streamlit Cloud, `@st.cache_resource` ensures the model is loaded once per deployment instance and reused across sessions.
 
 ---
 
-## 9. Related reading
+## 7. LLM Provider Selection Logic
 
-- [methodology.md](methodology.md) — formal RAG + scoring semantics  
-- [README.md](README.md) — commands and env matrix  
+```
+LLM_PROVIDER env var
+        |
+        +-- "groq"   --> OpenAI(api_key=GROQ_API_KEY, base_url=groq_base_url)
+        |
+        +-- "openai" --> OpenAI(api_key=OPENAI_API_KEY)
+        |
+        +-- "auto"   --> GROQ_API_KEY set?
+                              |
+                        yes --+--> Groq
+                        no  --+--> OPENAI_API_KEY set?
+                                         |
+                                   yes --+--> OpenAI
+                                   no  --+--> RuntimeError
+```
+
+---
+
+## 8. Degradation Paths
+
+| Stage | Failure Condition | System Behavior |
+|---|---|---|
+| Text extraction | Unsupported file extension | ValueError raised; Streamlit displays error, stops analysis |
+| Text extraction | Scanned PDF (no text layer) | Returns empty or near-empty string; validation check raises ValueError |
+| Policy text too short | Fewer than 50 characters after extraction | ValueError: "Company policy text is too short after extraction" |
+| Regulation chunking | Zero chunks produced | ValueError: "Could not chunk regulation text" |
+| Summarize LLM call | Non-JSON response | Fallback summary with empty arrays; chunk loop continues |
+| Compare LLM call | Non-JSON response | Finding populated with `error: invalid_json`, `risk: medium`, `gap_type: ambiguous_clause` |
+| Department LLM call | Non-JSON response | All findings retain empty `departments` arrays |
+| API key missing | Both GROQ_API_KEY and OPENAI_API_KEY empty | RuntimeError surfaced in Streamlit error display |
+
+The pipeline is designed to complete and produce a partial result rather than abort on individual LLM failures. This is appropriate for a demo context where a degraded result is more useful than no result.
+
+---
+
+## 9. Deployment Topologies
+
+### A. Local Development
+
+Single process on developer machine. `.env` file provides secrets. Streamlit serves on `127.0.0.1:8501`.
+
+```
+Developer machine
++----------------------------------+
+|  .venv/                          |
+|  streamlit run streamlit_app.py  |
+|  .env (gitignored)               |
++----------------------------------+
+        |
+        v
+  http://127.0.0.1:8501
+```
+
+### B. Streamlit Community Cloud (current production)
+
+```
+GitHub repository
+        |
+        | webhook on push
+        v
+Streamlit Cloud runtime
++----------------------------------+
+|  streamlit_app.py                |
+|  requirements.txt (auto-install) |
+|  Secrets dashboard (env vars)    |
+|  HF model cache (persistent)     |
++----------------------------------+
+        |
+        v
+  https://your-app.streamlit.app
+```
+
+Session state is not shared across users. Each user session runs an independent analysis pipeline. There is no shared database or result cache.
+
+### C. Production-Grade Architecture (recommended path)
+
+For multi-user, high-availability deployment, the synchronous single-process model should be replaced with an async worker architecture:
+
+```
++------------------+     +------------------+     +------------------+
+|  Streamlit UI    | --> |  FastAPI gateway  | --> |  Task queue      |
+|  (presentation)  |     |  (job submission) |     |  (Redis / SQS)   |
++------------------+     +------------------+     +------------------+
+                                                           |
+                                                           v
+                                                  +------------------+
+                                                  |  Worker pool     |
+                                                  |  (analysis pods) |
+                                                  +------------------+
+                                                           |
+                                                           v
+                                                  +------------------+
+                                                  |  Object storage  |
+                                                  |  (results JSON)  |
+                                                  +------------------+
+```
+
+Key changes from current architecture:
+- `POST /analyze` returns `202 Accepted` with a job ID immediately
+- Workers execute the pipeline asynchronously
+- UI polls `GET /results/{job_id}` or receives a webhook
+- Results stored in object storage with tenant isolation
+- Worker pods scale horizontally for concurrent analyses
+
+---
+
+## 10. Cross-Cutting Concerns
+
+| Concern | Current State | Production Hardening |
+|---|---|---|
+| Observability | Streamlit default logging | OpenTelemetry spans per pipeline stage; token count tracking per LLM call |
+| Rate limiting | None | Per-session or per-user quotas on analysis runs |
+| Multi-tenancy | Single shared runtime on Streamlit Cloud | Tenant-prefixed storage; KMS-encrypted result artifacts |
+| Model drift | Prompts versioned in Git | Prompt registry with evaluation harness; regression tests on held-out clause pairs |
+| Dependency supply chain | requirements.txt with minimum version pins | Lock file (pip-compile); automated vulnerability scanning |
+| Authentication | None | OAuth2 / SAML SSO in front of Streamlit; API key rotation policy |
+
+---
+
+## 11. Related Documents
+
+- [methodology.md](methodology.md): RAG formulation, prompt contracts, scoring semantics, failure modes
+- [README.md](README.md): Setup commands, environment variable reference, deployment steps, troubleshooting
