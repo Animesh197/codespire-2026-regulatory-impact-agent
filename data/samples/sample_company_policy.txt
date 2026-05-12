@@ -1,0 +1,13 @@
+ACME CORP — Privacy Policy (Sample)
+
+We collect account and usage information to provide our services. We use industry-standard security measures. Contact privacy@acme.example for questions.
+
+Data retention: we keep logs for 90 days and account data while your subscription is active plus 30 days after closure.
+
+International users: data may be processed in the United States and other regions where we operate.
+
+Your rights: you may request access or deletion by emailing support. We respond on a best-effort basis.
+
+Security: we encrypt data in transit. We do not guarantee encryption at rest for all legacy systems.
+
+Incidents: if we discover an issue we will notify affected users when required by law.

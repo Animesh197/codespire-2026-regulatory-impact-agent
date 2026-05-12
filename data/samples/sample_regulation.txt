@@ -1,0 +1,21 @@
+SAMPLE REGULATION EXCERPT — Data Protection (Illustrative)
+
+Article 5 — Principles
+1. Personal data shall be processed lawfully, fairly, and in a transparent manner.
+2. Data minimization: collect only what is adequate, relevant, and limited to what is necessary.
+3. Storage limitation: retain personal data no longer than necessary for the purposes.
+
+Article 12 — Transparency
+Controllers shall provide concise, transparent, intelligible information about processing in plain language.
+
+Article 15 — Access
+Data subjects have the right to obtain confirmation of processing and a copy of personal data undergoing processing within 30 days.
+
+Article 32 — Security
+Controllers shall implement appropriate technical and organizational measures including pseudonymization, encryption, and regular testing of effectiveness.
+
+Article 33 — Breach notification
+Where feasible, the supervisory authority shall be notified within 72 hours of becoming aware of a personal data breach.
+
+Article 44 — Transfers
+Transfers of personal data to third countries shall take place only with appropriate safeguards such as standard contractual clauses.
