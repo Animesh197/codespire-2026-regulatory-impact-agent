@@ -76,8 +76,8 @@ Detailed diagrams: [Architecture diagram.md](Architecture%20diagram.md).
 ## Installation
 
 ```bash
-git clone <your-fork-or-repo-url>
-cd hackethon
+git clone https://github.com/Animesh197/codespire-2026-regulatory-impact-agent.git
+cd codespire-2026-regulatory-impact-agent
 python3 -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
@@ -113,7 +113,7 @@ Loaded via `pydantic-settings` from **repository-root** `.env`. Names are **case
 ### API (development)
 
 ```bash
-cd hackethon    # must be the directory containing backend/
+cd codespire-2026-regulatory-impact-agent    # repo root must contain backend/
 source .venv/bin/activate
 uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
 ```
@@ -182,7 +182,7 @@ curl -s "http://127.0.0.1:8000/results?job_id=<paste-uuid>"
 ## Repository layout
 
 ```
-hackethon/
+codespire-2026-regulatory-impact-agent/
 ├── backend/
 │   ├── api/                 # routes, Pydantic schemas
 │   ├── services/            # extraction, chunking, embeddings, vector_store, rag, llm, compliance_engine
@@ -228,4 +228,13 @@ hackethon/
 
 ## License
 
-Demonstration / hackathon unless you attach a proper OSS or proprietary license for redistribution.
+See [LICENSE](LICENSE) (**Apache-2.0**). This hackathon build provides decision-support analytics only—not legal certification.
+
+## Bundled demo PDFs (repository root)
+
+| File | Use |
+|------|-----|
+| `DPDP_Regulation_Sample.pdf` | Regulation-side sample |
+| `Incomplete_Company_Privacy_Policy.pdf` | Policy-side sample (incomplete by design for gap testing) |
+
+Upload via **Streamlit**, or use `data/samples/*.txt` for faster smoke tests.
