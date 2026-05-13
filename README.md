@@ -94,8 +94,8 @@ All processing is in-process within the Streamlit runtime. There is no HTTP boun
 ```bash
 git clone https://github.com/Animesh197/codespire-2026-regulatory-impact-agent.git
 cd codespire-2026-regulatory-impact-agent
-python3 -m venv .venv
-source .venv/bin/activate
+python3 -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 cp .env.example .env
 # Edit .env and set GROQ_API_KEY
