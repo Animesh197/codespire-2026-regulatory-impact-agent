@@ -154,7 +154,9 @@ GROQ_MODEL   = "llama-3.3-70b-versatile"
 | `DPDP_Regulation_Sample.pdf` | Regulation-side input sample (DPDP Act excerpts) |
 | `Incomplete_Company_Privacy_Policy.pdf` | Policy-side input sample (intentionally incomplete for gap demonstration) |
 | `data/samples/sample_regulation.txt` | Plain-text regulation sample for faster smoke tests |
-| `data/samples/sample_company_policy.txt` | Plain-text policy sample |
+| `data/samples/sample_company_policy.txt` | Plain-text policy sample for quick testing |
+
+Use the sample documents to test the system without uploading your own files.
 
 ---
 
