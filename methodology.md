@@ -143,7 +143,7 @@ The score is bounded to [0, 100]. It is a demo KPI designed to give a single-num
 Let:
 - N' = number of regulation chunks analyzed (after cap)
 - M = number of policy chunks
-- K = retrieval width
+- K = retrieval width (default: 5)
 
 **LLM calls per analysis session:**
 
@@ -159,6 +159,11 @@ C_emb = M + N'  (policy index build + regulation chunk queries)
 ```
 
 With default settings (max_reg_chunks=24, K=5), a typical analysis session makes 26 LLM calls. Dominant latency is N' x LLM round-trip time. On Groq with llama-3.3-70b-versatile, each call typically completes in 1-4 seconds, giving a total analysis time of 30-120 seconds depending on document complexity.
+
+**Cost estimation:**
+- Groq: ~$0.50-$2.00 per analysis (varies by document size)
+- OpenAI GPT-4: ~$2.00-$8.00 per analysis
+- Local embeddings: zero API cost
 
 ---
 

@@ -7,9 +7,12 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .DS_Store
+Thumbs.db
 data/uploads/*
 !data/uploads/.gitkeep
 data/results/*
 !data/results/.gitkeep
 data/_streamlit_tmp/
 *.egg-info/
+.ipynb_checkpoints/
+*.ipynb
